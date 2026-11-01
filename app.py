@@ -1,0 +1,97 @@
+import os
+import streamlit as st
+from dotenv import load_dotenv
+from openai import OpenAI
+from pydantic import BaseModel, Field
+
+# 1. Define the exact structure the AI MUST return
+class TicketTriage(BaseModel):
+    category: str = Field(description="The main issue category: Billing, Technical Support, Account Access, or General Inquiry")
+    priority: str = Field(description="Priority level: Low, Medium, High, or Critical")
+    sentiment: str = Field(description="The customer's emotional state: Positive, Neutral, Frustrated, or Angry")
+    department_routing: str = Field(description="Which team gets this ticket: Tier 1 Support, Advanced Tech (Tier 2), Billing Dept, or Retention")
+    summary: str = Field(description="A 1-sentence concise summary of the customer's problem")
+
+# 2. Load API credentials & Initialize Client with smart fallback
+load_dotenv("../.env")
+groq_key = os.environ.get("GROQ_API_KEY")
+openai_key = os.environ.get("OPENAI_API_KEY")
+
+if groq_key:
+    api_key = groq_key.strip()
+    base_url = "https://api.groq.com/openai/v1" 
+    active_model = "openai/gpt-oss-20b"
+elif openai_key:
+    api_key = openai_key.strip()
+    base_url = None
+    active_model = "openai/gpt-oss-120b"
+else:
+    st.error("No API key found. Please check your .env file.")
+    st.stop()
+
+client = OpenAI(api_key=api_key, base_url=base_url)
+
+# 3. Streamlit UI Configuration
+st.set_page_config(page_title="Autonomous Ticket Triage", page_icon="🎫", layout="wide")
+st.title("Autonomous Ticket Triage Engine")
+st.caption("Instantly categorize and route messy customer emails into structured database payloads.")
+
+# 4. Input Layout
+st.subheader("Incoming Customer Ticket")
+default_email = """Ticket #88492
+From: angry_customer99@email.com
+Message: I have been trying to log into my account for three days and it keeps saying my password is wrong. I reset it twice and it STILL won't work. I have an automatic payment coming out tomorrow and if I get an overdraft fee because I can't check my balance I am going to cancel my entire account. Fix this immediately!"""
+
+customer_email = st.text_area("Paste customer email/message here:", value=default_email, height=150)
+
+# 5. Processing and Output
+if st.button("Triage Ticket", type="primary"):
+    if customer_email.strip():
+        with st.spinner("Analyzing and routing..."):
+            try:
+                system_prompt = """You are an automated contact center triage system. 
+                Analyze the incoming customer ticket and extract the exact information required.
+                You must return the data in perfect JSON format matching the requested schema.
+                Do not include any other conversational text."""
+
+                completion = client.chat.completions.create(
+                    model=active_model,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {
+                            "role": "user", 
+                            "content": f"Extract the data for this ticket and return JSON matching this schema: {TicketTriage.model_json_schema()}\n\nTicket Text: {customer_email}"
+                        }
+                    ],
+                    temperature=0.1
+                )
+                
+                # Parse and validate output
+                raw_json_response = completion.choices[0].message.content
+                parsed_ticket = TicketTriage.model_validate_json(raw_json_response)
+                
+                st.success("Ticket successfully triaged!")
+                
+                # Display metrics in a clean 4-column dashboard layout
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Category", parsed_ticket.category)
+                
+                # Add dynamic visual styling for priority
+                priority_color = "red" if parsed_ticket.priority in ["High", "Critical"] else "green"
+                col2.markdown(f"**Priority:** <br> <span style='color:{priority_color}; font-size: 24px'>{parsed_ticket.priority}</span>", unsafe_allow_html=True)
+                
+                col3.metric("Sentiment", parsed_ticket.sentiment)
+                col4.metric("Routed To", parsed_ticket.department_routing)
+                
+                st.divider()
+                st.subheader("Ticket Summary")
+                st.info(parsed_ticket.summary)
+                
+                with st.expander("View Raw JSON Payload (Database Ready)"):
+                    st.json(raw_json_response)
+                    
+            except Exception as e:
+                st.error(f"An error occurred: {e}")
+    else:
+        st.warning("Please paste a ticket to triage.")
